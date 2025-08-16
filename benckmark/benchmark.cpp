@@ -14,7 +14,7 @@
 #include <cstring>
 
 // Include tqdm from the repository root
-#include "tqdm.h"
+#include "../tqdm.h"
 
 // Platform-specific includes for memory measurement
 #ifdef __linux__
