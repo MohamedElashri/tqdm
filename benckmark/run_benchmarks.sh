@@ -1,6 +1,19 @@
 #!/bin/bash
 # run_benchmarks.sh
 
+# run using `script -q -c "./run_benchmarks.sh" /dev/stdout > /dev/null`
+
+set -euo pipefail
+mkdir -p logs
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+LOG=logs/bench_$TS.raw.txt
+if [ -t 1 ]; then
+  exec > >(tee -a "$LOG") 2>&1
+else
+  exec >>"$LOG" 2>&1
+fi
+
+
 echo "Building tqdm benchmark suite..."
 make clean
 make
