@@ -1,6 +1,6 @@
 # Makefile for tqdm benchmark
 CXX = g++
-CXXFLAGS = -std=c++11 -O3 -Wall -Wextra -pthread -march=native
+CXXFLAGS = -std=c++11 -O3 -DNDEBUG -Wall -Wextra -pthread -march=native
 LDFLAGS = -pthread
 
 # Debug build flags
@@ -17,7 +17,7 @@ $(EXECUTABLE): $(SOURCES)
 	$(CXX) $(CXXFLAGS) $(SOURCES) -o $(EXECUTABLE) $(LDFLAGS)
 
 # Debug build
-debug: CXXFLAGS += $(DEBUG_FLAGS)
+debug: CXXFLAGS = -std=c++11 $(DEBUG_FLAGS) -Wall -Wextra -pthread -march=native
 debug: LDFLAGS += -fsanitize=thread
 debug: $(EXECUTABLE)
 
@@ -25,7 +25,7 @@ debug: $(EXECUTABLE)
 run: $(EXECUTABLE)
 	./$(EXECUTABLE)
 
-# Run with performance monitoring
+# Run with performance monitoring (Linux perf)
 perf: $(EXECUTABLE)
 	perf stat -d ./$(EXECUTABLE)
 
@@ -35,9 +35,9 @@ clean:
 
 # Install (fetches tqdm.h if not present)
 install-deps:
-	@if [ ! -f tqdm.h ]; then \
+	@if [ ! -f ../tqdm.h ]; then \
 		echo "Downloading tqdm.h..."; \
-		curl -O https://raw.githubusercontent.com/MohamedElashri/tqdm/main/tqdm.h; \
+		curl -o ../tqdm.h https://raw.githubusercontent.com/MohamedElashri/tqdm/main/tqdm.h; \
 	fi
 
 .PHONY: all debug run perf clean install-deps

@@ -1,4 +1,4 @@
-// benchmark.cpp 
+// benchmark.cpp
 #include <iostream>
 #include <vector>
 #include <thread>
@@ -12,60 +12,34 @@
 #include <memory>
 #include <atomic>
 #include <cstring>
+#include <mutex>
 
-// Include tqdm from the repository root
 #include "../tqdm.h"
 
-// Platform-specific includes for memory measurement
 #ifdef __linux__
 #include <sys/resource.h>
 #include <unistd.h>
 #endif
 
-// C++11 compatibility helpers
-namespace cpp11_compat {
-    // make_unique for C++11
-    template<typename T, typename... Args>
-    std::unique_ptr<T> make_unique(Args&&... args) {
-        return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
-    }
-}
-
-// Benchmarking utilities
 namespace benchmark {
 
-// High-resolution timer
+// -------------------- Timer --------------------
 class Timer {
     using clock = std::chrono::high_resolution_clock;
     using time_point = clock::time_point;
     using duration = std::chrono::duration<double>;
-    
     time_point start_;
-    
 public:
     Timer() : start_(clock::now()) {}
-    
-    void reset() {
-        start_ = clock::now();
-    }
-    
-    double elapsed() const {
-        return duration(clock::now() - start_).count();
-    }
-    
-    double elapsed_ns() const {
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(
-            clock::now() - start_
-        ).count();
-    }
+    void reset() { start_ = clock::now(); }
+    double elapsed() const { return duration(clock::now() - start_).count(); } // seconds
 };
 
-// Memory usage tracker
+// -------------------- MemoryTracker --------------------
 class MemoryTracker {
 #ifdef __linux__
     long initial_rss_;
-    
-    long get_current_rss() {
+    static long get_current_rss() {
         std::ifstream stat_stream("/proc/self/stat", std::ios_base::in);
         std::string pid, comm, state, ppid, pgrp, session, tty_nr;
         std::string tpgid, flags, minflt, cminflt, majflt, cmajflt;
@@ -73,24 +47,20 @@ class MemoryTracker {
         std::string O, itrealvalue, starttime;
         unsigned long vsize;
         long rss;
-        
         stat_stream >> pid >> comm >> state >> ppid >> pgrp >> session >> tty_nr
                     >> tpgid >> flags >> minflt >> cminflt >> majflt >> cmajflt
                     >> utime >> stime >> cutime >> cstime >> priority >> nice
                     >> O >> itrealvalue >> starttime >> vsize >> rss;
-        
         long page_size = sysconf(_SC_PAGE_SIZE);
         return rss * page_size;
     }
 #endif
-    
 public:
     MemoryTracker() {
 #ifdef __linux__
         initial_rss_ = get_current_rss();
 #endif
     }
-    
     long get_memory_usage() {
 #ifdef __linux__
         return get_current_rss() - initial_rss_;
@@ -98,469 +68,236 @@ public:
         return -1; // Not supported on this platform
 #endif
     }
-    
-    std::string format_bytes(long bytes) {
+    static std::string format_bytes(long bytes) {
         if (bytes < 0) return "N/A";
-        
         const char* units[] = {"B", "KB", "MB", "GB"};
         int unit_idx = 0;
         double size = static_cast<double>(bytes);
-        
-        while (size >= 1024 && unit_idx < 3) {
-            size /= 1024;
-            unit_idx++;
-        }
-        
+        while (size >= 1024 && unit_idx < 3) { size /= 1024; unit_idx++; }
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(2) << size << " " << units[unit_idx];
         return oss.str();
     }
 };
 
-// Statistics calculator
+// -------------------- Statistics --------------------
 class Statistics {
-    std::vector<double> samples_;
-    
+    std::vector<double> samples_; // seconds per run
 public:
-    void add_sample(double value) {
-        samples_.push_back(value);
-    }
-    
-    void clear() {
-        samples_.clear();
-    }
-    
+    void add_sample(double v) { samples_.push_back(v); }
+    void clear() { samples_.clear(); }
     double mean() const {
         if (samples_.empty()) return 0.0;
-        double sum = std::accumulate(samples_.begin(), samples_.end(), 0.0);
-        return sum / samples_.size();
+        double s = std::accumulate(samples_.begin(), samples_.end(), 0.0);
+        return s / samples_.size();
     }
-    
-    double median() {
-        if (samples_.empty()) return 0.0;
-        std::vector<double> sorted = samples_;
-        std::sort(sorted.begin(), sorted.end());
-        size_t n = sorted.size();
-        return n % 2 == 0 ? (sorted[n/2-1] + sorted[n/2]) / 2 : sorted[n/2];
-    }
-    
     double stddev() const {
         if (samples_.size() < 2) return 0.0;
         double m = mean();
-        double sq_sum = std::accumulate(samples_.begin(), samples_.end(), 0.0,
-            [m](double acc, double val) { 
-                double diff = val - m;
-                return acc + diff * diff; 
-            });
-        return std::sqrt(sq_sum / (samples_.size() - 1));
+        double sq = 0.0;
+        for (double v : samples_) { double d=v-m; sq += d*d; }
+        return std::sqrt(sq / (samples_.size() - 1));
     }
-    
     double min() const {
         return samples_.empty() ? 0.0 : *std::min_element(samples_.begin(), samples_.end());
     }
-    
     double max() const {
         return samples_.empty() ? 0.0 : *std::max_element(samples_.begin(), samples_.end());
     }
-    
-    double percentile(double p) const {
-        if (samples_.empty()) return 0.0;
-        std::vector<double> sorted = samples_;
-        std::sort(sorted.begin(), sorted.end());
-        size_t idx = static_cast<size_t>(p * sorted.size() / 100.0);
-        return sorted[std::min(idx, sorted.size() - 1)];
-    }
 };
 
-// Benchmark result structure
+// -------------------- BenchmarkResult --------------------
 struct BenchmarkResult {
     std::string name;
-    size_t iterations;
-    size_t threads;
-    Statistics time_per_op;
-    double total_time;
-    long memory_usage;
-    double ops_per_second;
+    size_t iterations{0};
+    size_t threads{1};
+    Statistics run_time;                 // stats for full-run durations (s)
+    double total_benchmark_time{0.0};    // s, wall over sampling
+    long memory_usage{-1};               // bytes
+    // Derived per-update stats:
+    double mean_update_s{0.0};
+    double stddev_update_s{0.0};
+    double min_update_s{0.0};
+    double max_update_s{0.0};
+    double updates_per_second{0.0};
+
+    // Baseline comparison (optional)
+    bool has_baseline{false};
+    double baseline_mean_update_s{0.0};
+    double delta_update_s{0.0}; // mean_update_s - baseline_mean_update_s
 };
 
-// Result formatter
+// -------------------- Formatting helpers --------------------
+static std::string format_seconds(double s) {
+    std::ostringstream oss;
+    if (s < 1e-6) {
+        oss << std::fixed << std::setprecision(1) << s * 1e9 << "ns";
+    } else if (s < 1e-3) {
+        oss << std::fixed << std::setprecision(1) << s * 1e6 << "us";
+    } else if (s < 1.0) {
+        oss << std::fixed << std::setprecision(1) << s * 1e3 << "ms";
+    } else {
+        oss << std::fixed << std::setprecision(2) << s << "s";
+    }
+    return oss.str();
+}
+
+static std::string format_throughput(double upd_per_sec) {
+    std::ostringstream oss;
+    if (upd_per_sec >= 1e9)      { oss << std::fixed << std::setprecision(2) << upd_per_sec / 1e9 << " G"; }
+    else if (upd_per_sec >= 1e6) { oss << std::fixed << std::setprecision(2) << upd_per_sec / 1e6 << " M"; }
+    else if (upd_per_sec >= 1e3) { oss << std::fixed << std::setprecision(2) << upd_per_sec / 1e3 << " K"; }
+    else                         { oss << std::fixed << std::setprecision(0) << upd_per_sec; }
+    return oss.str();
+}
+
+// -------------------- ResultFormatter --------------------
 class ResultFormatter {
 public:
     static void print_header() {
         std::cout << "\n"
-                  << std::setw(30) << std::left << "Benchmark"
-                  << std::setw(12) << std::right << "Iterations"
+                  << std::setw(36) << std::left << "Benchmark"
+                  << std::setw(13) << std::right << "Iterations"
                   << std::setw(10) << "Threads"
-                  << std::setw(15) << "Time/Op"
-                  << std::setw(12) << "Std Dev"
-                  << std::setw(12) << "Min"
-                  << std::setw(12) << "Max"
-                  << std::setw(15) << "Throughput"
+                  << std::setw(16) << "Mean/update"
+                  << std::setw(14) << "StdDev/update"
+                  << std::setw(14) << "Min/update"
+                  << std::setw(14) << "Max/update"
+                  << std::setw(18) << "Delta vs base"
+                  << std::setw(14) << "upd/s"
                   << std::setw(12) << "Memory"
-                  << "\n" << std::string(120, '-') << "\n";
+                  << "\n" << std::string(161, '-') << "\n";
     }
-    
-    static void print_result(const BenchmarkResult& result) {
-        std::cout << std::setw(30) << std::left << result.name
-                  << std::setw(12) << std::right << result.iterations
-                  << std::setw(10) << result.threads
-                  << std::setw(12) << format_time(result.time_per_op.mean()) << "/op"
-                  << std::setw(12) << format_time(result.time_per_op.stddev())
-                  << std::setw(12) << format_time(result.time_per_op.min())
-                  << std::setw(12) << format_time(result.time_per_op.max())
-                  << std::setw(12) << format_throughput(result.ops_per_second) << "/s";
-        
-        if (result.memory_usage >= 0) {
-            MemoryTracker tracker;
-            std::cout << std::setw(12) << tracker.format_bytes(result.memory_usage);
+
+    static void print_result(const BenchmarkResult& r) {
+        std::cout << std::setw(36) << std::left << r.name
+                  << std::setw(13) << std::right << add_commas(r.iterations)
+                  << std::setw(10) << r.threads
+                  << std::setw(16) << format_seconds(r.mean_update_s)
+                  << std::setw(14) << format_seconds(r.stddev_update_s)
+                  << std::setw(14) << format_seconds(r.min_update_s)
+                  << std::setw(14) << format_seconds(r.max_update_s);
+
+        if (r.has_baseline) {
+            std::ostringstream d; d << format_seconds(r.delta_update_s);
+            std::cout << std::setw(18) << d.str();
         } else {
-            std::cout << std::setw(12) << "N/A";
+            std::cout << std::setw(18) << "-";
         }
-        std::cout << "\n";
+
+        std::ostringstream t;
+        t << format_throughput(r.updates_per_second) << " upd/s";
+        std::cout << std::setw(14) << t.str();
+
+        std::cout << std::setw(12) << MemoryTracker::format_bytes(r.memory_usage)
+                  << "\n";
     }
-    
+
 private:
-    static std::string format_time(double seconds) {
-        std::ostringstream oss;
-        if (seconds < 1e-6) {
-            oss << std::fixed << std::setprecision(1) << seconds * 1e9 << "ns";
-        } else if (seconds < 1e-3) {
-            oss << std::fixed << std::setprecision(1) << seconds * 1e6 << "µs";
-        } else if (seconds < 1) {
-            oss << std::fixed << std::setprecision(1) << seconds * 1e3 << "ms";
-        } else {
-            oss << std::fixed << std::setprecision(2) << seconds << "s";
-        }
-        return oss.str();
-    }
-    
-    static std::string format_throughput(double ops_per_sec) {
-        std::ostringstream oss;
-        if (ops_per_sec >= 1e9) {
-            oss << std::fixed << std::setprecision(2) << ops_per_sec / 1e9 << "G";
-        } else if (ops_per_sec >= 1e6) {
-            oss << std::fixed << std::setprecision(2) << ops_per_sec / 1e6 << "M";
-        } else if (ops_per_sec >= 1e3) {
-            oss << std::fixed << std::setprecision(2) << ops_per_sec / 1e3 << "K";
-        } else {
-            oss << std::fixed << std::setprecision(0) << ops_per_sec;
-        }
-        return oss.str();
+    static std::string add_commas(size_t x) {
+        std::string s = std::to_string(x);
+        for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3) s.insert(static_cast<size_t>(i), ",");
+        return s;
     }
 };
 
-// Main benchmark runner
+// -------------------- Runner --------------------
 class BenchmarkRunner {
-    static constexpr size_t WARMUP_ITERATIONS = 100;
-    static constexpr size_t MIN_BENCHMARK_TIME = 1; // seconds
+    static constexpr size_t WARMUP_ITER = 50;
+    static constexpr double MIN_TIME_S = 1.0;
     static constexpr size_t MAX_SAMPLES = 1000;
-    
+
 public:
     template<typename Func>
-    static BenchmarkResult run(const std::string& name, 
-                              size_t iterations,
-                              size_t threads,
-                              Func&& benchmark_func) {
-        std::cout << "Running: " << name << "... " << std::flush;
-        
+    static BenchmarkResult run(const std::string& name,
+                               size_t iterations,
+                               size_t threads,
+                               Func&& fn) {
         // Warmup
-        for (size_t i = 0; i < WARMUP_ITERATIONS && i < iterations / 10; ++i) {
-            benchmark_func();
-        }
-        
-        // Memory measurement
-        MemoryTracker mem_tracker;
-        
-        // Time measurement
+        for (size_t i = 0; i < WARMUP_ITER; ++i) fn();
+
+        MemoryTracker mem;
         Statistics stats;
-        Timer total_timer;
-        
-        // Auto-adjust sample count based on operation speed
+        Timer wall;
         size_t samples = 0;
-        double elapsed = 0;
-        
-        while (elapsed < MIN_BENCHMARK_TIME && samples < MAX_SAMPLES) {
-            Timer timer;
-            benchmark_func();
-            double op_time = timer.elapsed();
-            stats.add_sample(op_time);
-            samples++;
-            elapsed = total_timer.elapsed();
+
+        while (wall.elapsed() < MIN_TIME_S && samples < MAX_SAMPLES) {
+            Timer t;
+            fn(); // one full run
+            stats.add_sample(t.elapsed());
+            ++samples;
         }
-        
-        double total_time = total_timer.elapsed();
-        
-        BenchmarkResult result;
-        result.name = name;
-        result.iterations = iterations;
-        result.threads = threads;
-        result.time_per_op = stats;
-        result.total_time = total_time;
-        result.memory_usage = mem_tracker.get_memory_usage();
-        result.ops_per_second = samples / total_time;
-        
-        std::cout << "Done\n";
-        return result;
+
+        double mean_run_s = stats.mean();
+        double stddev_run_s = stats.stddev();
+        double min_run_s = stats.min();
+        double max_run_s = stats.max();
+
+        BenchmarkResult r;
+        r.name = name;
+        r.iterations = iterations;
+        r.threads = threads;
+        r.run_time = stats;
+        r.total_benchmark_time = wall.elapsed();
+        r.memory_usage = mem.get_memory_usage();
+
+        // Derive per-update stats
+        if (iterations > 0) {
+            r.mean_update_s   = mean_run_s / static_cast<double>(iterations);
+            r.stddev_update_s = stddev_run_s / static_cast<double>(iterations);
+            r.min_update_s    = min_run_s / static_cast<double>(iterations);
+            r.max_update_s    = max_run_s / static_cast<double>(iterations);
+            r.updates_per_second = static_cast<double>(iterations) / mean_run_s;
+        }
+        return r;
     }
 };
 
 } // namespace benchmark
 
-// Helper class to manage progress bars with proper ownership
-class ProgressBarManager {
-    std::unique_ptr<tqdm::progress_bar<>> bar_;
-    
+// -------------------- Utilities for baselines --------------------
+static inline void spin_empty_work(size_t iters) {
+    volatile size_t sink = 0;
+    for (size_t i = 0; i < iters; ++i) sink += i;
+}
+
+// Baseline for batch-stepped loops: i += step
+static inline void spin_empty_work_batched(size_t total, size_t step) {
+    volatile size_t sink = 0;
+    for (size_t i = 0; i < total; i += step) sink += i;
+}
+
+// -------------------- Null display (tracker-only) --------------------
+class null_display : public tqdm::display_policy {
 public:
-    explicit ProgressBarManager(size_t total) 
-        : bar_(new tqdm::progress_bar<>(total)) {}
-    
-    void advance(size_t n = 1) {
-        bar_->advance(n);
-    }
-    
-    void finish() {
-        bar_->finish();
-    }
+    void render(const tqdm::progress_tracker<>&) override {}
+    void finish(const tqdm::progress_tracker<>&) override {}
 };
 
-// Benchmark implementations
-void benchmark_single_thread_advance() {
-    using namespace benchmark;
-    std::vector<BenchmarkResult> results;
-    
-    // Test different iteration counts
-    std::vector<size_t> iteration_counts = {1000, 10000, 100000, 1000000};
-    
-    for (auto iterations : iteration_counts) {
-        auto result = BenchmarkRunner::run(
-            "Single-thread advance(" + std::to_string(iterations) + ")",
-            iterations,
-            1,
-            [iterations]() {
-                // Redirect output to null
-                std::streambuf* orig = std::cout.rdbuf();
-                std::cout.rdbuf(nullptr);
-                
-                ProgressBarManager bar(iterations);
-                for (size_t i = 0; i < iterations; ++i) {
-                    bar.advance();
-                }
-                bar.finish();
-                
-                std::cout.rdbuf(orig);
-            }
-        );
-        results.push_back(result);
-    }
-    
-    // Batch updates
-    for (auto iterations : iteration_counts) {
-        size_t batch_size = std::max<size_t>(1, iterations / 1000);
-        auto result = BenchmarkRunner::run(
-            "Batch advance(" + std::to_string(iterations) + ", batch=" + 
-            std::to_string(batch_size) + ")",
-            iterations,
-            1,
-            [iterations, batch_size]() {
-                std::streambuf* orig = std::cout.rdbuf();
-                std::cout.rdbuf(nullptr);
-                
-                ProgressBarManager bar(iterations);
-                for (size_t i = 0; i < iterations; i += batch_size) {
-                    bar.advance(batch_size);
-                }
-                bar.finish();
-                
-                std::cout.rdbuf(orig);
-            }
-        );
-        results.push_back(result);
-    }
-    
-    // Print results
-    ResultFormatter::print_header();
-    for (const auto& result : results) {
-        ResultFormatter::print_result(result);
-    }
-}
-
-void benchmark_multi_thread_advance() {
-    using namespace benchmark;
-    std::vector<BenchmarkResult> results;
-    
-    size_t num_cores = std::thread::hardware_concurrency();
-    std::vector<size_t> thread_counts = {2, 4, num_cores, num_cores * 2};
-    std::vector<size_t> iteration_counts = {10000, 100000, 1000000};
-    
-    for (auto threads : thread_counts) {
-        for (auto iterations : iteration_counts) {
-            auto result = BenchmarkRunner::run(
-                "Multi-thread advance(" + std::to_string(iterations) + ")",
-                iterations,
-                threads,
-                [iterations, threads]() {
-                    std::streambuf* orig = std::cout.rdbuf();
-                    std::cout.rdbuf(nullptr);
-                    
-                    std::shared_ptr<ProgressBarManager> bar = 
-                        std::make_shared<ProgressBarManager>(iterations);
-                    std::vector<std::thread> workers;
-                    size_t items_per_thread = iterations / threads;
-                    
-                    for (size_t t = 0; t < threads; ++t) {
-                        workers.emplace_back([bar, items_per_thread]() {
-                            for (size_t i = 0; i < items_per_thread; ++i) {
-                                bar->advance();
-                            }
-                        });
-                    }
-                    
-                    for (auto& worker : workers) {
-                        worker.join();
-                    }
-                    
-                    bar->finish();
-                    std::cout.rdbuf(orig);
-                }
-            );
-            results.push_back(result);
+// -------------------- ProgressBarManager with pluggable display --------------------
+class ProgressBarManager {
+    std::unique_ptr<tqdm::progress_bar<>> bar_;
+public:
+    explicit ProgressBarManager(size_t total, std::unique_ptr<tqdm::display_policy> disp = nullptr) {
+        if (disp) {
+            bar_.reset(new tqdm::progress_bar<>(total, std::move(disp)));
+        } else {
+            bar_.reset(new tqdm::progress_bar<>(total)); // default display (TTY-aware)
         }
     }
-    
-    // Print results
-    std::cout << "\n\nMulti-threaded Performance:\n";
-    ResultFormatter::print_header();
-    for (const auto& result : results) {
-        ResultFormatter::print_result(result);
-    }
-}
+    void advance(size_t n = 1) { bar_->advance(n); }
+    void finish() { bar_->finish(); }
+};
 
-void benchmark_display_overhead() {
-    using namespace benchmark;
-    std::vector<BenchmarkResult> results;
-    
-    // Test display refresh rates
-    size_t iterations = 100000;
-    
-    // With display
-    auto with_display = BenchmarkRunner::run(
-        "With display output",
-        iterations,
-        1,
-        [iterations]() {
-            ProgressBarManager bar(iterations);
-            for (size_t i = 0; i < iterations; ++i) {
-                bar.advance();
-                // Force more frequent updates for testing
-                if (i % 100 == 0) {
-                    std::this_thread::sleep_for(std::chrono::microseconds(1));
-                }
-            }
-        }
-    );
-    results.push_back(with_display);
-    
-    // Without display (null output)
-    auto without_display = BenchmarkRunner::run(
-        "Without display (null output)",
-        iterations,
-        1,
-        [iterations]() {
-            std::streambuf* orig = std::cout.rdbuf();
-            std::cout.rdbuf(nullptr);
-            
-            ProgressBarManager bar(iterations);
-            for (size_t i = 0; i < iterations; ++i) {
-                bar.advance();
-                if (i % 100 == 0) {
-                    std::this_thread::sleep_for(std::chrono::microseconds(1));
-                }
-            }
-            
-            std::cout.rdbuf(orig);
-        }
-    );
-    results.push_back(without_display);
-    
-    // Range-based loop
-    std::vector<int> data(iterations);
-    auto range_based = BenchmarkRunner::run(
-        "Range-based for loop",
-        iterations,
-        1,
-        [&data]() {
-            std::streambuf* orig = std::cout.rdbuf();
-            std::cout.rdbuf(nullptr);
-            
-            for (auto& item : tqdm::tqdm(data)) {
-                // Minimal work
-                item++;
-            }
-            
-            std::cout.rdbuf(orig);
-        }
-    );
-    results.push_back(range_based);
-    
-    // Print results
-    std::cout << "\n\nDisplay Overhead:\n";
-    ResultFormatter::print_header();
-    for (const auto& result : results) {
-        ResultFormatter::print_result(result);
-    }
-}
+// -------------------- Sections --------------------
+using benchmark::BenchmarkRunner;
+using benchmark::BenchmarkResult;
+using benchmark::ResultFormatter;
 
-void benchmark_memory_usage() {
-    using namespace benchmark;
-    std::vector<BenchmarkResult> results;
-    
-    // Test memory usage with different progress bar counts
-    std::vector<size_t> bar_counts = {1, 10, 100, 1000};
-    
-    for (auto count : bar_counts) {
-        auto result = BenchmarkRunner::run(
-            "Memory usage (" + std::to_string(count) + " bars)",
-            1000,
-            1,
-            [count]() {
-                std::streambuf* orig = std::cout.rdbuf();
-                std::cout.rdbuf(nullptr);
-                
-                std::vector<std::shared_ptr<ProgressBarManager>> bars;
-                for (size_t i = 0; i < count; ++i) {
-                    bars.push_back(std::make_shared<ProgressBarManager>(1000));
-                }
-                
-                // Update all bars
-                for (size_t i = 0; i < 1000; ++i) {
-                    for (auto& bar : bars) {
-                        bar->advance();
-                    }
-                }
-                
-                std::cout.rdbuf(orig);
-            }
-        );
-        results.push_back(result);
-    }
-    
-    // Print results
-    std::cout << "\n\nMemory Usage:\n";
-    ResultFormatter::print_header();
-    for (const auto& result : results) {
-        ResultFormatter::print_result(result);
-    }
-}
-
-// System information
-void print_system_info() {
+static void print_system_info() {
     std::cout << "System Information:\n";
     std::cout << "==================\n";
-    
-    // CPU info
     std::cout << "CPU Cores: " << std::thread::hardware_concurrency() << "\n";
-    
-    // Compiler info
     std::cout << "Compiler: ";
 #ifdef __clang__
     std::cout << "Clang " << __clang_major__ << "." << __clang_minor__;
@@ -570,8 +307,6 @@ void print_system_info() {
     std::cout << "Unknown";
 #endif
     std::cout << "\n";
-    
-    // C++ standard
     std::cout << "C++ Standard: ";
 #if __cplusplus >= 202002L
     std::cout << "C++20";
@@ -585,8 +320,6 @@ void print_system_info() {
     std::cout << "Pre-C++11";
 #endif
     std::cout << "\n";
-    
-    // Build type
     std::cout << "Build Type: ";
 #ifdef NDEBUG
     std::cout << "Release";
@@ -596,21 +329,193 @@ void print_system_info() {
     std::cout << "\n\n";
 }
 
+static void benchmark_single_thread() {
+    using namespace benchmark;
+    std::vector<BenchmarkResult> out;
+
+    std::vector<size_t> iters = {1000, 10000, 100000, 1000000};
+
+    for (auto n : iters) {
+        // Baseline
+        auto base = BenchmarkRunner::run(
+            "Baseline loop (" + std::to_string(n) + ")",
+            n, 1, [n]() { spin_empty_work(n); }
+        );
+
+        // Tracker-only (null display)
+        auto r = BenchmarkRunner::run(
+            "Single-thread advance(" + std::to_string(n) + ") [tracker-only]",
+            n, 1, [n]() {
+                ProgressBarManager bar(n, std::unique_ptr<tqdm::display_policy>(new null_display()));
+                for (size_t i = 0; i < n; ++i) bar.advance();
+                bar.finish();
+            }
+        );
+        r.has_baseline = true;
+        r.baseline_mean_update_s = base.mean_update_s;
+        r.delta_update_s = r.mean_update_s - base.mean_update_s;
+        out.push_back(r);
+    }
+
+    // Batch updates: same total updates, fewer calls
+    for (auto n : iters) {
+        size_t batch = std::max<size_t>(1, n / 1000);
+        auto base = BenchmarkRunner::run(
+            "Baseline batched (" + std::to_string(n) + ", step=" + std::to_string(batch) + ")",
+            n, 1, [n, batch]() { spin_empty_work_batched(n, batch); }
+        );
+
+        auto r = BenchmarkRunner::run(
+            "Batch advance(" + std::to_string(n) + ", batch=" + std::to_string(batch) + ") [tracker-only]",
+            n, 1, [n, batch]() {
+                ProgressBarManager bar(n, std::unique_ptr<tqdm::display_policy>(new null_display()));
+                for (size_t i = 0; i < n; i += batch) bar.advance(batch);
+                bar.finish();
+            }
+        );
+        r.has_baseline = true;
+        r.baseline_mean_update_s = base.mean_update_s;
+        r.delta_update_s = r.mean_update_s - base.mean_update_s;
+        out.push_back(r);
+    }
+
+    ResultFormatter::print_header();
+    for (const auto& r : out) ResultFormatter::print_result(r);
+}
+
+static void benchmark_multi_thread() {
+    using namespace benchmark;
+    std::vector<BenchmarkResult> out;
+
+    const size_t cores = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<size_t> thread_counts = {2, 4, cores, cores * 2};
+    std::vector<size_t> iters = {10000, 100000, 1000000};
+
+    for (auto th : thread_counts) {
+        for (auto n : iters) {
+            // Baseline multi-thread
+            auto base = BenchmarkRunner::run(
+                "Baseline MT (" + std::to_string(n) + ", t=" + std::to_string(th) + ")",
+                n, th, [n, th]() {
+                    size_t per = n / th;
+                    std::vector<std::thread> ws;
+                    ws.reserve(th);
+                    for (size_t t = 0; t < th; ++t) {
+                        ws.emplace_back([per]() { spin_empty_work(per); });
+                    }
+                    for (auto& w : ws) w.join();
+                }
+            );
+
+            auto r = BenchmarkRunner::run(
+                "Multi-thread advance(" + std::to_string(n) + ") [tracker-only]",
+                n, th, [n, th]() {
+                    size_t per = n / th;
+                    auto bar = std::make_shared<ProgressBarManager>(n, std::unique_ptr<tqdm::display_policy>(new null_display()));
+                    std::vector<std::thread> ws;
+                    ws.reserve(th);
+                    for (size_t t = 0; t < th; ++t) {
+                        ws.emplace_back([bar, per]() {
+                            for (size_t i = 0; i < per; ++i) bar->advance();
+                        });
+                    }
+                    for (auto& w : ws) w.join();
+                    bar->finish();
+                }
+            );
+            r.has_baseline = true;
+            r.baseline_mean_update_s = base.mean_update_s;
+            r.delta_update_s = r.mean_update_s - base.mean_update_s;
+            out.push_back(r);
+        }
+    }
+
+    std::cout << "\n\nMulti-threaded Performance (tracker-only):\n";
+    ResultFormatter::print_header();
+    for (const auto& r : out) ResultFormatter::print_result(r);
+}
+
+static void benchmark_tracker_vs_display() {
+    using namespace benchmark;
+    std::vector<BenchmarkResult> out;
+    const size_t n = 100000;
+
+    // Baseline
+    auto base = BenchmarkRunner::run("Baseline loop (" + std::to_string(n) + ")", n, 1, [n]() { spin_empty_work(n); });
+
+    // Tracker-only
+    auto tracker_only = BenchmarkRunner::run(
+        "Tracker-only (null display)", n, 1, [n]() {
+            ProgressBarManager bar(n, std::unique_ptr<tqdm::display_policy>(new null_display()));
+            for (size_t i = 0; i < n; ++i) bar.advance();
+            bar.finish();
+        }
+    );
+    tracker_only.has_baseline = true;
+    tracker_only.baseline_mean_update_s = base.mean_update_s;
+    tracker_only.delta_update_s = tracker_only.mean_update_s - base.mean_update_s;
+    out.push_back(tracker_only);
+
+    // Standard display (TTY-aware; throttled inside)
+    auto std_display = BenchmarkRunner::run(
+        "Standard display (TTY-aware)", n, 1, [n]() {
+            ProgressBarManager bar(n); // default display
+            for (size_t i = 0; i < n; ++i) {
+                bar.advance();
+                if (i % 100 == 0) { std::this_thread::sleep_for(std::chrono::microseconds(1)); }
+            }
+            bar.finish();
+        }
+    );
+    std_display.has_baseline = true;
+    std_display.baseline_mean_update_s = base.mean_update_s;
+    std_display.delta_update_s = std_display.mean_update_s - base.mean_update_s;
+    out.push_back(std_display);
+
+    std::cout << "\n\nTracker vs Display:\n";
+    ResultFormatter::print_header();
+    for (const auto& r : out) ResultFormatter::print_result(r);
+}
+
+static void benchmark_memory_usage() {
+    using namespace benchmark;
+    std::vector<BenchmarkResult> out;
+
+    std::vector<size_t> counts = {1, 10, 100, 1000};
+    for (auto c : counts) {
+        auto r = BenchmarkRunner::run(
+            "Memory usage (" + std::to_string(c) + " bars)",
+            1000, 1, [c]() {
+                std::vector<std::shared_ptr<ProgressBarManager>> bars;
+                bars.reserve(c);
+                for (size_t i = 0; i < c; ++i) {
+                    bars.push_back(std::make_shared<ProgressBarManager>(1000, std::unique_ptr<tqdm::display_policy>(new null_display())));
+                }
+                for (size_t i = 0; i < 1000; ++i) {
+                    for (auto& b : bars) b->advance();
+                }
+                for (auto& b : bars) b->finish();
+            }
+        );
+        out.push_back(r);
+    }
+
+    std::cout << "\n\nMemory Usage:\n";
+    ResultFormatter::print_header();
+    for (const auto& r : out) ResultFormatter::print_result(r);
+}
+
 int main(int, char*[]) {
     std::cout << "tqdm C++ Benchmark Suite\n";
     std::cout << "========================\n\n";
-    
     print_system_info();
-    
-    // Run all benchmarks
+
     std::cout << "Starting benchmarks...\n";
-    
-    benchmark_single_thread_advance();
-    benchmark_multi_thread_advance();
-    benchmark_display_overhead();
+    benchmark_single_thread();
+    benchmark_multi_thread();
+    benchmark_tracker_vs_display();
     benchmark_memory_usage();
-    
+
     std::cout << "\nBenchmark complete!\n";
-    
     return 0;
 }
