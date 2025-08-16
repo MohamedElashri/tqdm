@@ -394,6 +394,37 @@ Get current progress statistics.
 
 ## Performance
 
+
+### Overhead at a glance
+
+* Single-thread call to `advance()`: \~0.5 us per update.
+* With on-screen display enabled: +\~0.05 us per update (same order of magnitude).
+* Many threads updating the same bar (8–16 threads): \~1.0–1.5 us per update.
+* Multiple bars updated in the same tick: \~0.5 us per bar; total cost adds linearly.
+* Batching: amortized overhead per element ≈ 0.5 us / batch\_size.
+
+Quick guide:
+
+```
+Batch size   Overhead per element
+1            ~0.5 us
+10           ~0.05 us
+100          ~0.005 us
+1000         ~0.0005 us
+```
+
+Rule of thumb:
+
+```
+Work per item    Overhead share (single-thread)
+0.5 us           ~100%  -> batch updates
+5 us             ~10%
+50 us            ~1%
+500 us           ~0.1%
+```
+
+Recommended default: update every 1–10 ms or every \~10^3 items, whichever comes first.
+
 ### Tips for Optimal Performance
 
 1. **Batch Updates**: For very fast loops, update every N iterations:
