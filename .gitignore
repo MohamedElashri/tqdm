@@ -47,4 +47,5 @@ tqdm_benchmark
 .vscode/
 
 # logs
-**/*.log
+*.log
+*.txt
