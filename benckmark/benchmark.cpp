@@ -346,7 +346,7 @@ static void benchmark_single_thread() {
         auto r = BenchmarkRunner::run(
             "Single-thread advance(" + std::to_string(n) + ") [tracker-only]",
             n, 1, [n]() {
-                ProgressBarManager bar(n, std::unique_ptr<tqdm::display_policy>(new null_display()));
+                ProgressBarManager bar(n, std::make_unique<null_display>());
                 for (size_t i = 0; i < n; ++i) bar.advance();
                 bar.finish();
             }
@@ -368,7 +368,7 @@ static void benchmark_single_thread() {
         auto r = BenchmarkRunner::run(
             "Batch advance(" + std::to_string(n) + ", batch=" + std::to_string(batch) + ") [tracker-only]",
             n, 1, [n, batch]() {
-                ProgressBarManager bar(n, std::unique_ptr<tqdm::display_policy>(new null_display()));
+                ProgressBarManager bar(n, std::make_unique<null_display>());
                 for (size_t i = 0; i < n; i += batch) bar.advance(batch);
                 bar.finish();
             }
@@ -411,7 +411,7 @@ static void benchmark_multi_thread() {
                 "Multi-thread advance(" + std::to_string(n) + ") [tracker-only]",
                 n, th, [n, th]() {
                     size_t per = n / th;
-                    auto bar = std::make_shared<ProgressBarManager>(n, std::unique_ptr<tqdm::display_policy>(new null_display()));
+                    auto bar = std::make_shared<ProgressBarManager>(n, std::make_unique<null_display>());
                     std::vector<std::thread> ws;
                     ws.reserve(th);
                     for (size_t t = 0; t < th; ++t) {
@@ -446,7 +446,7 @@ static void benchmark_tracker_vs_display() {
     // Tracker-only
     auto tracker_only = BenchmarkRunner::run(
         "Tracker-only (null display)", n, 1, [n]() {
-            ProgressBarManager bar(n, std::unique_ptr<tqdm::display_policy>(new null_display()));
+            ProgressBarManager bar(n, std::make_unique<null_display>());
             for (size_t i = 0; i < n; ++i) bar.advance();
             bar.finish();
         }
@@ -489,7 +489,7 @@ static void benchmark_memory_usage() {
                 std::vector<std::shared_ptr<ProgressBarManager>> bars;
                 bars.reserve(c);
                 for (size_t i = 0; i < c; ++i) {
-                    bars.push_back(std::make_shared<ProgressBarManager>(1000, std::unique_ptr<tqdm::display_policy>(new null_display())));
+                    bars.push_back(std::make_shared<ProgressBarManager>(1000, std::make_unique<null_display>()));
                 }
                 for (size_t i = 0; i < 1000; ++i) {
                     for (auto& b : bars) b->advance();
