@@ -218,16 +218,16 @@ namespace themes {
 template<typename ClockT = std::chrono::steady_clock>
 class progress_tracker {
 private:
-    std::atomic<std::size_t> current_{0};
-    std::atomic<std::size_t> total_{0};
-    const typename ClockT::time_point start_time_;
-
     static constexpr std::size_t HISTORY_SIZE = 64;
     struct alignas(64) history_entry {
         std::atomic<std::size_t> progress{0};
         std::atomic<int64_t> timestamp{0};
     };
     mutable std::array<history_entry, HISTORY_SIZE> history_;
+    
+    std::atomic<std::size_t> current_{0};
+    std::atomic<std::size_t> total_{0};
+    const typename ClockT::time_point start_time_;
     std::atomic<std::size_t> history_index_{0};
 
     struct stats_cache {
@@ -315,12 +315,16 @@ public:
             }
         }
 
-        {
-            std::lock_guard<std::mutex> lock(cache_mutex_);
-            cache_.rate = rate;
-            cache_.last_update = now;
-            cache_.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time_);
-        }
+                {
+        #ifdef TQDM_CPP17
+                    std::lock_guard<std::shared_mutex> lock(cache_mutex_);
+        #else
+                    std::lock_guard<std::mutex> lock(cache_mutex_);
+        #endif
+                    cache_.rate = rate;
+                    cache_.last_update = now;
+                    cache_.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time_);
+                }
         return rate;
     }
 
@@ -470,7 +474,7 @@ public:
                           std::unique_ptr<display_policy> display = nullptr)
         : tracker_(new progress_tracker<>(static_cast<std::size_t>(total)))
         , display_(display ? std::move(display)
-                           : std::unique_ptr<display_policy>(new bar_display<decltype(themes::unicode)>())) {
+                           : std::make_unique<bar_display<decltype(themes::unicode)>>()) {
         if (is_tty()) {
             std::lock_guard<std::mutex> lock(render_mutex_);
             display_->render(*tracker_);
